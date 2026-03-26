@@ -16,7 +16,7 @@ export let hotkeyRecordingActive = false
 
 export const DEFAULT_HOTKEY_SHORTCUT = 'CmdOrCtrl+Shift+V'
 
-export type HotkeyOutputMode = 'clipboard' | 'type'
+export type HotkeyOutputMode = 'clipboard' | 'type' | 'type_single_line'
 
 interface HotkeyContextType {
 	hotkeyEnabled: boolean
@@ -147,7 +147,13 @@ export function HotkeyProvider({ children }: { children: ReactNode }) {
 
 				resultText = resultText.trim()
 				// Output result
-				if (hotkeyOutputModeRef.current === 'type') {
+				if (hotkeyOutputModeRef.current === 'type_single_line') {
+					// Copilot mode: collapse all newlines and surrounding whitespace into a single space
+					// so the text is typed as one continuous line without line breaks
+					resultText = resultText.replace(/\s*\n\s*/g, ' ')
+					resultText = resultText.replace(/\s+/g, ' ')
+					await invoke('type_text', { text: resultText })
+				} else if (hotkeyOutputModeRef.current === 'type') {
 					await invoke('type_text', { text: resultText })
 				} else {
 					await clipboard.writeText(resultText)

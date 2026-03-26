@@ -75,6 +75,7 @@
 	"hotkey-output-mode": "Output mode",
 	"hotkey-output-clipboard": "Copy to clipboard",
 	"hotkey-output-type": "Type at cursor",
+	"hotkey-output-type_single_line": "Type text (single line, Copilot mode)",
 	"hotkey-transcription-copied": "Transcription copied to clipboard",
 	"i-prefer-manual-setup": "I prefer to download manually",
 	"include-sub-folders": "Include sub folders",
