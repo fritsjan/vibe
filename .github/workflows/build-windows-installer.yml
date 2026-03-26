@@ -1,0 +1,145 @@
+name: Build Windows Installer
+
+# Trigger manually from the GitHub Actions UI (Actions → Build Windows Installer → Run workflow).
+# The resulting .exe is committed to the root of the main branch so it can be
+# downloaded directly from the repository without setting up a local build environment.
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - main
+        paths:
+            - 'desktop/**'
+            - 'scripts/pre_build.py'
+            - '.github/workflows/build-windows-installer.yml'
+
+# Only one installer build runs at a time.  A new push cancels the in-progress run.
+concurrency:
+    group: build-windows-installer
+    cancel-in-progress: true
+
+jobs:
+    build-and-commit:
+        runs-on: windows-latest
+        timeout-minutes: 120
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout repository (full history for branch switching)
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  package_json_file: desktop/package.json
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: desktop/pnpm-lock.yaml
+
+            - name: Setup uv
+              uses: astral-sh/setup-uv@v5
+
+            - name: Rust cache
+              uses: swatinem/rust-cache@v2
+
+            - name: Install Rust stable
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Install frontend dependencies
+              run: pnpm install
+              working-directory: ./desktop
+
+            - name: Run pre_build.py
+              run: uv run scripts/pre_build.py --target x86_64-pc-windows-msvc
+
+            # Use the repository secret when available; otherwise generate a temporary
+            # signing key so the build succeeds without updater-signing secrets configured.
+            # Installers built with a temporary key cannot be verified by the auto-updater
+            # but are otherwise fully functional.
+            - name: Setup Tauri signing key
+              shell: bash
+              env:
+                  TAURI_PRIVATE_KEY_SECRET: ${{ secrets.TAURI_PRIVATE_KEY }}
+                  TAURI_KEY_PASSWORD_SECRET: ${{ secrets.TAURI_KEY_PASSWORD }}
+              run: |
+                  if [ -n "$TAURI_PRIVATE_KEY_SECRET" ]; then
+                      echo "TAURI_SIGNING_PRIVATE_KEY=$TAURI_PRIVATE_KEY_SECRET" >> "$GITHUB_ENV"
+                      echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
+                      echo "Using repository signing key."
+                  else
+                      echo "TAURI_PRIVATE_KEY secret not set – generating a temporary key for this build."
+                      # --ci sets an empty password and suppresses interactive prompts
+                      pnpm --dir desktop exec tauri signer generate -w "$RUNNER_TEMP/tauri.key" --ci
+                      echo "TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/tauri.key")" >> "$GITHUB_ENV"
+                  fi
+
+            - name: Build Tauri Windows installer
+              run: pnpm exec tauri build --target x86_64-pc-windows-msvc
+              working-directory: ./desktop
+              env:
+                  APTABASE_APP_KEY: ${{ secrets.APTABASE_APP_KEY }}
+                  APTABASE_BASE_URL: ${{ secrets.APTABASE_BASE_URL }}
+
+            - name: Find NSIS installer
+              id: installer
+              shell: bash
+              run: |
+                  BUNDLE_DIR="desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+                  # Prefer the full setup exe (not the update-only bundle)
+                  INSTALLER=$(find "$BUNDLE_DIR" -maxdepth 1 -name "*_x64-setup.exe" | head -1)
+                  if [ -z "$INSTALLER" ]; then
+                      INSTALLER=$(find "$BUNDLE_DIR" -maxdepth 1 -name "*.exe" | grep -v "_update" | head -1)
+                  fi
+                  if [ -z "$INSTALLER" ]; then
+                      echo "ERROR: No installer .exe found in $BUNDLE_DIR"
+                      ls -la "$BUNDLE_DIR" || true
+                      exit 1
+                  fi
+                  echo "path=$INSTALLER" >> "$GITHUB_OUTPUT"
+                  echo "name=$(basename "$INSTALLER")" >> "$GITHUB_OUTPUT"
+                  echo "Found installer: $INSTALLER"
+
+            # Copy the installer to the root of the main branch and push.
+            # Note: GitHub enforces a 100 MB hard limit per file.  If the installer
+            # exceeds that limit you will need to enable Git LFS for this repository.
+            - name: Commit installer to root of main branch
+              shell: bash
+              run: |
+                  SRC="${{ steps.installer.outputs.path }}"
+                  NAME="${{ steps.installer.outputs.name }}"
+
+                  # Stash the installer outside the working tree before switching branches
+                  cp "$SRC" "$RUNNER_TEMP/$NAME"
+
+                  # Configure git identity
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  # Switch to main (fetched with full depth above)
+                  git checkout main
+
+                  # Remove any previous installer(s) from the root to keep it tidy
+                  # (--ignore-unmatch handles the case where no .exe exists yet)
+                  git rm --ignore-unmatch '*.exe'
+
+                  # Place the new installer
+                  cp "$RUNNER_TEMP/$NAME" "./$NAME"
+                  git add "$NAME"
+
+                  # Only commit when something actually changed
+                  if git diff --cached --quiet; then
+                      echo "Installer is identical to the current version – nothing to commit."
+                  else
+                      git commit -m "ci: update Windows installer [$NAME]"
+                      git push origin main
+                      echo "Installer committed and pushed to main."
+                  fi
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
