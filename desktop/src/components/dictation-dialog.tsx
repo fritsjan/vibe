@@ -86,7 +86,7 @@ export default function DictationDialog() {
 								/>
 							</div>
 							<div className="flex gap-2">
-								{(['clipboard', 'type'] as HotkeyOutputMode[]).map((mode) => (
+								{(['clipboard', 'type', 'type_single_line'] as HotkeyOutputMode[]).map((mode) => (
 									<button
 										key={mode}
 										type="button"
